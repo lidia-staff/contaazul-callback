@@ -1,65 +1,58 @@
+import fetch from "node-fetch";
+import { createClient } from "redis";
+
+const redis = createClient({
+  url: process.env.REDIS_URL
+});
+
+await redis.connect();
+
 export default async function handler(req, res) {
-  try {
-    const { code, state, error, error_description } = req.query;
+  const { code, state, error } = req.query;
 
-    console.log("Callback recebido:", { code, state, error });
+  if (error) {
+    return res.status(400).send("Erro na autorização do Conta Azul");
+  }
 
-    if (error) {
-      console.error("Erro OAuth:", error_description);
-      return res.status(400).send(`Erro OAuth: ${error_description}`);
-    }
+  if (!code || !state) {
+    return res.status(400).send("Code ou state ausente");
+  }
 
-    if (!code) {
-      return res.status(400).send("Callback sem code.");
-    }
-
-    const clientId = process.env.CA_CLIENT_ID;
-    const clientSecret = process.env.CA_CLIENT_SECRET;
-
-    if (!clientId || !clientSecret) {
-      console.error("Client ID ou Client Secret não configurados");
-      return res.status(500).send("Client ID / Client Secret ausentes.");
-    }
-
-    const tokenUrl = "https://auth.contaazul.com/oauth2/token";
-    const redirectUri = "https://api.staffconsult.com.br/api/contaazul/callback";
-
-    const basicAuth = Buffer
-      .from(`${clientId}:${clientSecret}`)
-      .toString("base64");
-
-    const body = new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri,
-    });
-
-    const response = await fetch(tokenUrl, {
+  const tokenResponse = await fetch(
+    "https://auth.contaazul.com/oauth2/token",
+    {
       method: "POST",
       headers: {
-        Authorization: `Basic ${basicAuth}`,
-        "Content-Type": "application/x-www-form-urlencoded",
+        "Authorization":
+          "Basic " +
+          Buffer.from(
+            `${process.env.CA_CLIENT_ID}:${process.env.CA_CLIENT_SECRET}`
+          ).toString("base64"),
+        "Content-Type": "application/x-www-form-urlencoded"
       },
-      body,
-    });
-
-    const data = await response.json();
-
-    console.log("Resposta token Conta Azul:", data);
-
-    if (!response.ok) {
-      console.error("Erro ao gerar tokens:", data);
-      return res.status(400).json(data);
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri:
+          "https://api.staffconsult.com.br/api/contaazul/callback"
+      })
     }
+  );
 
-    // 🔐 Aqui depois vamos salvar por cliente (state = AKLAB)
-    console.log("OAuth concluído com sucesso para:", state);
+  const tokens = await tokenResponse.json();
 
-    return res
-      .status(200)
-      .send(`OAuth OK para ${state}. Tokens gerados com sucesso.`);
-  } catch (err) {
-    console.error("Erro inesperado no callback:", err);
-    return res.status(500).send("Erro interno no callback.");
+  if (!tokens.access_token) {
+    return res.status(500).json(tokens);
   }
+
+  // salva tokens por cliente
+  await redis.set(
+    `contaazul:${state}`,
+    JSON.stringify(tokens),
+    { EX: tokens.expires_in }
+  );
+
+  return res
+    .status(200)
+    .send(`Auth OK para ${state}. Tokens armazenados.`);
 }
